@@ -1,0 +1,130 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  AWS CloudFormation to setup the ec2 backup process. This takes backup of ebs
+  volume which are tagged with Backup, adds the snapshot id to the parameter store, and does the deletion of older snapshots
+  Replace PUT_NAME_OF_BUCKET_HERE with the actual bucket name
+Parameters:
+ ApplicationName:
+  Description: 'Name of the application'
+  Type: String
+  Default: myapp
+ EnvironmentClass:
+  Description: 'Environment of the application'
+  Type: String
+  Default: prd
+Resources:
+  EC2SnapshotInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EC2SnapshotRole
+  EC2SnapshotPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: EC2SnapshotPolicy
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'ec2:CreateSnapshot'
+              - 'ec2:DeleteSnapshot'
+              - 'ec2:CreateTags'
+              - 'ec2:ModifySnapshotAttribute'
+              - 'ec2:ResetSnapshotAttribute'
+              - 'ec2:DescribeInstances'
+              - 'ec2:DescribeSnapshots'
+              - 'autoscaling:*'
+              - 'logs:PutLogEvents'
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'ssm:*'
+              - 'ec2:*'
+            Resource: '*'
+      Roles:
+        - !Ref EC2SnapshotRole
+  EC2SnapshotRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      RoleName: ADSK-lambda-ec2-backup-job-role
+      Path: /
+  EBSBackup:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: index.lambda_handler
+      FunctionName: EBS_Daily_Snapshot
+      Role: !GetAtt 
+        - EC2SnapshotRole
+        - Arn
+      Code:
+        S3Bucket: isen1-ebs-backup-lambda
+        S3Key: ebs-backup.zip
+      Runtime: python3.7
+      Timeout: 300
+      Environment:
+        Variables:
+          APPLICATION_NAME: !Ref 'ApplicationName'
+          ENVIRONMENT: !Ref 'EnvironmentClass'
+  EBSSnapshotCleanup:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: index.lambda_handler
+      FunctionName: EBS-Snapshot-Cleanup
+      Role: !GetAtt 
+        - EC2SnapshotRole
+        - Arn
+      Code:
+        S3Bucket: isen1-ebs-backup-lambda
+        S3Key: ebs-snapshot-cleanup.zip
+      Runtime: python3.7
+      Timeout: 300
+  ScheduledRule1:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Description: ebsdailybackup
+      ScheduleExpression: cron(15 12 * * ? *)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt 
+            - EBSBackup
+            - Arn
+          Id: TargetFunctionV1
+  ScheduledRule2:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Description: ebs-snapshot-cleanup
+      ScheduleExpression: cron(45 12 * * ? *)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt 
+            - EBSSnapshotCleanup
+            - Arn
+          Id: TargetFunctionV2
+  PermissionForEventsToInvokeLambda1:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Ref EBSBackup
+      Action: 'lambda:InvokeFunction'
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt 
+        - ScheduledRule1
+        - Arn
+  PermissionForEventsToInvokeLambda2:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Ref EBSSnapshotCleanup
+      Action: 'lambda:InvokeFunction'
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt 
+        - ScheduledRule2
+        - Arn
